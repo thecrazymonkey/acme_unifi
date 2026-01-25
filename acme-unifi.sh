@@ -58,7 +58,37 @@ log_ok()    { log "OK" "$@"; }
 
 die() {
     log_error "$@"
+    send_notification "FAILURE" "$*"
     exit 1
+}
+
+# Send notification via webhook
+send_notification() {
+    status="$1"
+    message="$2"
+
+    # Skip if webhook not configured or config not yet loaded
+    [ -z "${WEBHOOK_URL}" ] && return 0
+
+    log_info "Sending ${status} notification to webhook"
+
+    timestamp=$(date +"${DATE_FORMAT}")
+    domain="${CERT_DOMAIN:-unknown}"
+
+    # Escape special characters for JSON (quotes and backslashes)
+    escaped_message=$(printf '%s' "${message}" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
+
+    payload=$(printf '{"status":"%s","domain":"%s","message":"%s","timestamp":"%s"}' \
+        "${status}" "${domain}" "${escaped_message}" "${timestamp}")
+
+    # Use curl if available (with timeout)
+    if command -v curl >/dev/null 2>&1; then
+        curl -s -X POST -H "Content-Type: application/json" \
+            --max-time 10 -d "${payload}" "${WEBHOOK_URL}" >> "${LOG_FILE}" 2>&1 || log_warn "Webhook failed"
+    elif command -v wget >/dev/null 2>&1; then
+        wget --quiet --timeout=10 --post-data="${payload}" \
+            --header="Content-Type: application/json" "${WEBHOOK_URL}" -O - >> "${LOG_FILE}" 2>&1 || log_warn "Webhook failed"
+    fi
 }
 
 # Load configuration
@@ -71,13 +101,45 @@ load_config() {
 
     # Validate required settings
     [ -z "${CERT_DOMAIN}" ] && die "CERT_DOMAIN not set in config"
-    [ -z "${CERT_UUID}" ] && die "CERT_UUID not set in config"
     [ -z "${ACME_EMAIL}" ] && die "ACME_EMAIL not set in config"
 
     # Set defaults
     RENEWAL_DAYS="${RENEWAL_DAYS:-30}"
     USE_STAGING="${USE_STAGING:-false}"
     LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
+    CERT_TYPE="${CERT_TYPE:-ecc}" # Default to ECC
+    RESTART_UNIFI_CORE="${RESTART_UNIFI_CORE:-false}"
+    WEBHOOK_URL="${WEBHOOK_URL:-}"
+
+    # Auto-discover UUID if not set
+    if [ -z "${CERT_UUID}" ] || [ "${CERT_UUID}" = "auto" ]; then
+        discover_uuid
+    fi
+}
+
+# Auto-discover certificate UUID from UniFi config
+discover_uuid() {
+    log_info "Attempting to auto-discover certificate UUID..."
+
+    # Look for the .crt file that is most recently modified and has a UUID-like name
+    # UUID pattern: 8-4-4-4-12 hex characters
+    found_path=$(ls -t "${UNIFI_CERT_DIR}"/*.crt 2>/dev/null | grep -E "[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}" | head -n1)
+
+    if [ -n "${found_path}" ]; then
+        CERT_UUID=$(basename "${found_path}" .crt)
+        log_info "Auto-discovered active certificate UUID: ${CERT_UUID}"
+    else
+        log_error "No UUID-named certificate found in ${UNIFI_CERT_DIR}"
+        log_error ""
+        log_error "Before using this automation, you must import a certificate manually:"
+        log_error "  1. Go to UniFi Network Settings > System > Advanced"
+        log_error "  2. Upload a custom certificate (can be self-signed initially)"
+        log_error "  3. This creates the UUID-named certificate files the automation needs"
+        log_error "  4. Run this script again after importing"
+        log_error ""
+        log_error "Alternatively, set CERT_UUID manually in acme-unifi.env"
+        exit 1
+    fi
 }
 
 # Load AWS credentials
@@ -179,7 +241,14 @@ run_acme() {
     acme_args="${acme_args} --home ${ACME_HOME}"
     acme_args="${acme_args} --cert-home ${CERTS_DIR}"
     acme_args="${acme_args} --accountemail ${ACME_EMAIL}"
-    acme_args="${acme_args} --keylength 4096"
+
+    if [ "${CERT_TYPE}" = "ecc" ]; then
+        acme_args="${acme_args} --keylength ec-256"
+        log_info "Using ECC (Elliptic Curve) certificate"
+    else
+        acme_args="${acme_args} --keylength 4096"
+        log_info "Using RSA 4096 certificate"
+    fi
 
     if [ "${USE_STAGING}" = "true" ]; then
         acme_args="${acme_args} --staging"
@@ -243,15 +312,16 @@ deploy_cert() {
     log_ok "Certificate deployed successfully"
 }
 
-# Restart nginx service
-restart_nginx() {
-    log_info "Restarting nginx service"
+# Restart services
+restart_services() {
+    log_info "Restarting services"
 
+    # Restart nginx
+    log_info "Restarting nginx..."
     if systemctl restart nginx >> "${LOG_FILE}" 2>&1; then
         sleep 2
         if systemctl is-active --quiet nginx; then
             log_ok "nginx restarted successfully"
-            return 0
         else
             log_error "nginx failed to start after restart"
             return 1
@@ -260,6 +330,25 @@ restart_nginx() {
         log_error "Failed to restart nginx"
         return 1
     fi
+
+    # Optionally restart unifi-core
+    if [ "${RESTART_UNIFI_CORE}" = "true" ]; then
+        log_info "Restarting unifi-core..."
+        if systemctl restart unifi-core >> "${LOG_FILE}" 2>&1; then
+            sleep 3
+            if systemctl is-active --quiet unifi-core; then
+                log_ok "unifi-core restarted successfully"
+            else
+                log_error "unifi-core failed to start after restart"
+                return 1
+            fi
+        else
+            log_error "Failed to restart unifi-core"
+            return 1
+        fi
+    fi
+
+    return 0
 }
 
 # Show certificate status
@@ -271,8 +360,10 @@ show_status() {
     echo "Configuration:"
     echo "  Domain: ${CERT_DOMAIN}"
     echo "  UUID: ${CERT_UUID}"
+    echo "  Type: ${CERT_TYPE}"
     echo "  Renewal threshold: ${RENEWAL_DAYS} days"
     echo "  Staging mode: ${USE_STAGING}"
+    echo "  Restart unifi-core: ${RESTART_UNIFI_CORE}"
     echo ""
 
     if [ -f "${cert_file}" ]; then
@@ -312,8 +403,20 @@ show_status() {
 # Rotate logs
 rotate_logs() {
     if [ -d "${LOGS_DIR}" ]; then
-        find "${LOGS_DIR}" -name "*.log" -mtime +"${LOG_RETENTION_DAYS}" -delete 2>/dev/null
+        find "${LOGS_DIR}" -name "*.log" -mtime +"${LOG_RETENTION_DAYS}" -delete 2>/dev/null || true
     fi
+}
+
+# Update acme.sh and scripts
+update_scripts() {
+    log_info "Updating acme.sh..."
+    if [ -d "${ACME_HOME}/.git" ] && command -v git >/dev/null 2>&1; then
+        (cd "${ACME_HOME}" && git pull --quiet)
+    else
+        "${ACME_HOME}/acme.sh" --upgrade --home "${ACME_HOME}"
+    fi
+
+    log_ok "acme.sh updated"
 }
 
 # Main renewal workflow
@@ -343,10 +446,14 @@ do_renew() {
         # Deploy certificate
         deploy_cert
 
-        # Restart nginx
-        restart_nginx
-
-        log_ok "=== Certificate renewal completed successfully ==="
+        # Restart services
+        if restart_services; then
+            send_notification "SUCCESS" "Certificate renewed and services restarted"
+            log_ok "=== Certificate renewal completed successfully ==="
+        else
+            send_notification "WARN" "Certificate renewed but some services failed to restart"
+            log_warn "=== Certificate renewal completed with warnings ==="
+        fi
     else
         log_error "=== Certificate renewal failed ==="
         clear_aws_credentials
@@ -367,6 +474,7 @@ Usage: $(basename "$0") [command]
 Commands:
     renew        Check and renew certificate if needed (default)
     force-renew  Force certificate renewal regardless of expiry
+    update        Update acme.sh client
     status       Show certificate status
     help         Show this help message
 
@@ -394,6 +502,9 @@ main() {
             ;;
         force-renew|force)
             do_renew force
+            ;;
+        update)
+            update_scripts
             ;;
         status)
             show_status

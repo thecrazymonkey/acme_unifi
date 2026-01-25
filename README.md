@@ -7,11 +7,15 @@ Uses [acme.sh](https://github.com/acmesh-official/acme.sh) - a pure shell ACME c
 ## Features
 
 - **Automatic Renewal**: Daily cron job checks certificate expiry and renews when needed
+- **Auto-Discovery**: Automatically finds the active certificate UUID on your gateway
 - **Route53 DNS Challenge**: No need to open ports or modify firewall rules
+- **ECC & RSA Support**: Supports modern Elliptic Curve (ECC) and standard RSA certificates
+- **Webhook Notifications**: Get notified via Slack, Discord, or Healthchecks.io on success/failure
 - **Firmware Upgrade Safe**: Cron job persists across UniFi OS updates
 - **BusyBox Compatible**: POSIX shell scripts work on UCG Max's minimal environment
 - **Backup & Rollback**: Existing certificates are backed up before replacement
 - **Staging Support**: Test with Let's Encrypt staging server before production
+- **Auto-Updates**: Weekly task keeps acme.sh and scripts up to date
 
 ## Requirements
 
@@ -19,48 +23,67 @@ Uses [acme.sh](https://github.com/acmesh-official/acme.sh) - a pure shell ACME c
 - Domain name with DNS hosted on AWS Route53
 - AWS IAM credentials with Route53 permissions
 - SSH/root access to the UCG Max
+- **A custom certificate must be imported first** (see Prerequisites below)
+
+## Prerequisites
+
+Before installing this automation, you must import a custom certificate through the UniFi UI:
+
+1. Go to **UniFi Network Settings > System > Advanced**
+2. Upload any custom certificate (can be self-signed initially)
+3. This creates the UUID-named certificate files (`<UUID>.crt` and `<UUID>.key`) that this automation will manage
+
+This step is required because the automation replaces existing certificate files. Without an imported certificate, there are no UUID-named files to replace.
 
 ## Quick Start
 
-1. **Copy files to UCG Max**
+1. **Import a certificate via UniFi UI first** (if not already done)
+   - Go to UniFi Network Settings > System > Advanced
+   - Upload any custom certificate (self-signed is fine for initial setup)
+   - This creates the UUID-named files the automation will manage
+
+2. **Copy files to UCG Max**
    ```bash
    scp -r ./* root@gateway:/data/acme-unifi/
    ```
 
-2. **SSH to UCG Max**
+3. **SSH to UCG Max**
    ```bash
    ssh root@gateway
    cd /data/acme-unifi
    ```
 
-3. **Find your certificate UUID**
+4. **Verify certificate UUID exists**
    ```bash
    ls /data/unifi-core/config/*.crt
-   # Example output: /data/unifi-core/config/7f132919-e141-43b7-8ee3-ad7c3fee4c39.crt
+   # Should show: /data/unifi-core/config/7f132919-e141-43b7-8ee3-ad7c3fee4c39.crt
+   # If no UUID-named file exists, complete step 1 first
    ```
 
-4. **Edit configuration**
+5. **Edit configuration**
    ```bash
    vi acme-unifi.env
    ```
    Update:
    - `CERT_DOMAIN` - Your gateway's domain name
-   - `CERT_UUID` - UUID from step 3 (filename without extension)
+   - `CERT_UUID` - Set to `auto` or the UUID from step 4
+   - `CERT_TYPE` - `ecc` (recommended) or `rsa`
    - `ACME_EMAIL` - Your email for Let's Encrypt notifications
+   - `WEBHOOK_URL` - (Optional) URL for Slack/Discord/Healthchecks notifications
 
-5. **Create AWS credentials**
+6. **Create AWS credentials**
    ```bash
    cp aws-credentials.example .secrets/aws-credentials
    chmod 600 .secrets/aws-credentials
    vi .secrets/aws-credentials
    ```
 
-6. **Run installer**
+7. **Run installer**
    ```bash
    ./install.sh
    ```
 
-7. **Test with staging server**
+8. **Test with staging server**
    ```bash
    # Edit config and set USE_STAGING="true"
    vi acme-unifi.env
@@ -72,7 +95,7 @@ Uses [acme.sh](https://github.com/acmesh-official/acme.sh) - a pure shell ACME c
    ./acme-unifi.sh status
    ```
 
-8. **Switch to production**
+9. **Switch to production**
    ```bash
    # Edit config and set USE_STAGING="false"
    vi acme-unifi.env
@@ -162,6 +185,9 @@ Replace `YOUR_ZONE_ID` with your Route53 hosted zone ID.
 # Force renewal regardless of expiry
 ./acme-unifi.sh force-renew
 
+# Update acme.sh and scripts
+./acme-unifi.sh update
+
 # Help
 ./acme-unifi.sh help
 ```
@@ -173,21 +199,28 @@ Edit `acme-unifi.env`:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `CERT_DOMAIN` | Domain for the certificate | (required) |
-| `CERT_UUID` | Certificate UUID from UCG Max | (required) |
+| `CERT_UUID` | Certificate UUID (or `auto`) | `auto` |
+| `CERT_TYPE` | Certificate type (`ecc` or `rsa`) | `ecc` |
 | `ACME_EMAIL` | Email for Let's Encrypt | (required) |
 | `RENEWAL_DAYS` | Days before expiry to renew | 30 |
 | `USE_STAGING` | Use staging server for testing | false |
+| `WEBHOOK_URL` | Webhook URL for notifications | (empty) |
+| `RESTART_UNIFI_CORE` | Restart unifi-core service | false |
 | `LOG_RETENTION_DAYS` | Days to keep log files | 30 |
 
 ## Cron Schedule
 
-The installer sets up a cron job that runs daily at 3:00 AM:
+The installer sets up two cron jobs:
 
 ```
+# Daily certificate renewal check at 3:00 AM
 0 3 * * * root /data/acme-unifi/acme-unifi.sh renew
+
+# Weekly acme.sh update on Sunday at 4:00 AM
+0 4 * * 0 root /data/acme-unifi/acme-unifi.sh update
 ```
 
-The script checks if renewal is needed (certificate expiring within `RENEWAL_DAYS`) before making any changes.
+The renewal script checks if renewal is needed (certificate expiring within `RENEWAL_DAYS`) before making any changes.
 
 ## Verification
 

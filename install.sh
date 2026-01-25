@@ -160,6 +160,8 @@ setup_cron() {
 # ACME UniFi Certificate Renewal
 # Runs daily at 3:00 AM
 0 3 * * * root ${SCRIPT_DIR}/acme-unifi.sh renew >> ${LOGS_DIR}/cron.log 2>&1
+# Weekly update of acme.sh and scripts
+0 4 * * 0 root ${SCRIPT_DIR}/acme-unifi.sh update >> ${LOGS_DIR}/cron.log 2>&1
 EOF
 
     chmod 644 "${cron_file}"
@@ -232,8 +234,8 @@ verify_config() {
     fi
 
     if [ "${CERT_UUID}" = "7f132919-e141-43b7-8ee3-ad7c3fee4c39" ]; then
-        warn "CERT_UUID may need to be updated"
-        warn "Find your UUID: ls /data/unifi-core/config/*.crt"
+        warn "CERT_UUID is still set to template value"
+        warn "Find your UUID: ls /data/unifi-core/config/*.crt or set to \"auto\""
     fi
 
     return 0
@@ -277,7 +279,10 @@ Next steps:
   6. Check status:
      ${YELLOW}${SCRIPT_DIR}/acme-unifi.sh status${NC}
 
-Cron schedule: Daily at 3:00 AM
+Cron schedule:
+  - Certificate renewal: Daily at 3:00 AM
+  - acme.sh updates: Weekly on Sunday at 4:00 AM
+
 Logs: ${LOGS_DIR}/
 
 EOF
