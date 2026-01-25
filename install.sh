@@ -51,39 +51,14 @@ create_directories() {
 # Install acme.sh from official GitHub repository
 # https://github.com/acmesh-official/acme.sh
 install_acme() {
-    ACME_REPO="https://github.com/acmesh-official/acme.sh.git"
+    ACME_ARCHIVE="https://github.com/acmesh-official/acme.sh/archive/refs/heads/master.tar.gz"
 
     if [ -d "${ACME_HOME}" ] && [ -x "${ACME_HOME}/acme.sh" ]; then
-        info "acme.sh already installed, checking for updates..."
-        if command -v git >/dev/null 2>&1 && [ -d "${ACME_HOME}/.git" ]; then
-            cd "${ACME_HOME}"
-            git pull --quiet 2>/dev/null || warn "Could not update via git"
-            cd "${SCRIPT_DIR}"
-        else
-            cd "${ACME_HOME}"
-            ./acme.sh --upgrade --home "${ACME_HOME}" 2>/dev/null || true
-            cd "${SCRIPT_DIR}"
-        fi
+        info "acme.sh already installed"
         return 0
     fi
 
-    info "Installing acme.sh from ${ACME_REPO}..."
-
-    # Method 1: Clone via git (preferred)
-    if command -v git >/dev/null 2>&1; then
-        info "Cloning acme.sh repository..."
-        git clone --depth 1 "${ACME_REPO}" "${ACME_HOME}" 2>/dev/null
-        if [ -x "${ACME_HOME}/acme.sh" ]; then
-            info "acme.sh cloned successfully"
-            return 0
-        fi
-        warn "Git clone failed, trying archive download..."
-        rm -rf "${ACME_HOME}"
-    fi
-
-    # Method 2: Download archive (fallback for systems without git)
-    info "Downloading acme.sh archive..."
-    ACME_ARCHIVE="https://github.com/acmesh-official/acme.sh/archive/refs/heads/master.tar.gz"
+    info "Downloading acme.sh from GitHub..."
 
     mkdir -p "${ACME_HOME}"
     cd /tmp
@@ -93,7 +68,7 @@ install_acme() {
     elif command -v wget >/dev/null 2>&1; then
         wget -qO acme.sh.tar.gz "${ACME_ARCHIVE}"
     else
-        die "Neither git, curl, nor wget available"
+        die "Neither curl nor wget available"
     fi
 
     # Extract to ACME_HOME

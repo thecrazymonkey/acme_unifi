@@ -407,14 +407,30 @@ rotate_logs() {
     fi
 }
 
-# Update acme.sh and scripts
+# Update acme.sh from GitHub archive
 update_scripts() {
     log_info "Updating acme.sh..."
-    if [ -d "${ACME_HOME}/.git" ] && command -v git >/dev/null 2>&1; then
-        (cd "${ACME_HOME}" && git pull --quiet)
+
+    ACME_ARCHIVE="https://github.com/acmesh-official/acme.sh/archive/refs/heads/master.tar.gz"
+
+    cd /tmp
+
+    # Download archive
+    if command -v curl >/dev/null 2>&1; then
+        curl -sSL "${ACME_ARCHIVE}" -o acme.sh.tar.gz || { log_error "Failed to download acme.sh"; return 1; }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO acme.sh.tar.gz "${ACME_ARCHIVE}" || { log_error "Failed to download acme.sh"; return 1; }
     else
-        "${ACME_HOME}/acme.sh" --upgrade --home "${ACME_HOME}"
+        log_error "Neither curl nor wget available"
+        return 1
     fi
+
+    # Extract and update
+    tar -xzf acme.sh.tar.gz
+    cp -r acme.sh-master/* "${ACME_HOME}/"
+    rm -rf acme.sh.tar.gz acme.sh-master
+
+    cd "${SCRIPT_DIR}"
 
     log_ok "acme.sh updated"
 }
