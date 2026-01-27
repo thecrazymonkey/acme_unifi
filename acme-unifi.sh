@@ -228,6 +228,7 @@ backup_certs() {
 
 # Run acme.sh to issue/renew certificate
 run_acme() {
+    force="$1"
     log_info "Starting certificate issuance for ${CERT_DOMAIN}"
 
     acme_cmd="${ACME_HOME}/acme.sh"
@@ -238,6 +239,13 @@ run_acme() {
 
     # Build acme.sh command
     acme_args="--issue --dns dns_aws -d ${CERT_DOMAIN}"
+
+    # Pass --force to acme.sh to bypass its internal validity check
+    # This is needed when switching from staging to production or forcing renewal
+    if [ "${force}" = "force" ]; then
+        acme_args="${acme_args} --force"
+        log_info "Forcing certificate re-issuance (bypassing acme.sh cache)"
+    fi
     acme_args="${acme_args} --home ${ACME_HOME}"
     acme_args="${acme_args} --cert-home ${CERTS_DIR}"
     acme_args="${acme_args} --accountemail ${ACME_EMAIL}"
@@ -258,11 +266,15 @@ run_acme() {
     log_info "Running: acme.sh ${acme_args}"
 
     # Run acme.sh
+    # Disable globbing to prevent wildcard domains (*.example.com) from expanding
     # shellcheck disable=SC2086
+    set -f
     if "${acme_cmd}" ${acme_args} >> "${LOG_FILE}" 2>&1; then
+        set +f
         log_ok "Certificate issued successfully"
         return 0
     else
+        set +f
         log_error "Certificate issuance failed"
         return 1
     fi
@@ -458,7 +470,7 @@ do_renew() {
     load_aws_credentials
 
     # Issue/renew certificate
-    if run_acme; then
+    if run_acme "${force}"; then
         # Deploy certificate
         deploy_cert
 
