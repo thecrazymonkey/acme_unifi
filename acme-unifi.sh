@@ -110,6 +110,8 @@ load_config() {
     CERT_TYPE="${CERT_TYPE:-ecc}" # Default to ECC
     RESTART_UNIFI_CORE="${RESTART_UNIFI_CORE:-false}"
     WEBHOOK_URL="${WEBHOOK_URL:-}"
+    DNS_SLEEP="${DNS_SLEEP:-60}"
+    ACME_SERVER="${ACME_SERVER:-letsencrypt}"
 
     # Auto-discover UUID if not set
     if [ -z "${CERT_UUID}" ] || [ "${CERT_UUID}" = "auto" ]; then
@@ -261,7 +263,17 @@ run_acme() {
     if [ "${USE_STAGING}" = "true" ]; then
         acme_args="${acme_args} --staging"
         log_warn "Using Let's Encrypt STAGING server (certificates will not be trusted)"
+    else
+        # Explicitly set the CA server to avoid acme.sh v3+ defaulting to ZeroSSL,
+        # which requires EAB credentials and causes Le_LinkCert failures.
+        acme_args="${acme_args} --server ${ACME_SERVER}"
+        log_info "Using ACME server: ${ACME_SERVER}"
     fi
+
+    # Allow DNS record time to propagate before CA validation.
+    # Default 60s is conservative; increase DNS_SLEEP if challenges still fail.
+    acme_args="${acme_args} --dnssleep ${DNS_SLEEP}"
+    log_info "DNS propagation sleep: ${DNS_SLEEP}s"
 
     log_info "Running: acme.sh ${acme_args}"
 
@@ -276,6 +288,10 @@ run_acme() {
     else
         set +f
         log_error "Certificate issuance failed"
+        log_error "Relevant errors from log:"
+        grep -E "(error|Error|ERR|Le_Link|Could not|Verify|challenge|dns)" "${LOG_FILE}" | tail -20 | while IFS= read -r line; do
+            log_error "  ${line}"
+        done
         return 1
     fi
 }
@@ -484,6 +500,7 @@ do_renew() {
         fi
     else
         log_error "=== Certificate renewal failed ==="
+        send_notification "FAILURE" "Certificate issuance failed for ${CERT_DOMAIN}. Check logs: ${LOG_FILE}"
         clear_aws_credentials
         return 1
     fi
