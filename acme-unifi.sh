@@ -125,6 +125,7 @@ discover_uuid() {
 
     # Look for the .crt file that is most recently modified and has a UUID-like name
     # UUID pattern: 8-4-4-4-12 hex characters
+    # shellcheck disable=SC2010  # ls -t needed for mtime ordering; UUID names are safe
     found_path=$(ls -t "${UNIFI_CERT_DIR}"/*.crt 2>/dev/null | grep -E "[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}" | head -n1)
 
     if [ -n "${found_path}" ]; then
@@ -263,6 +264,7 @@ run_acme() {
     if [ "${USE_STAGING}" = "true" ]; then
         acme_args="${acme_args} --staging"
         log_warn "Using Let's Encrypt STAGING server (certificates will not be trusted)"
+        [ "${ACME_SERVER}" != "letsencrypt" ] && log_warn "ACME_SERVER=${ACME_SERVER} is ignored when USE_STAGING=true"
     else
         # Explicitly set the CA server to avoid acme.sh v3+ defaulting to ZeroSSL,
         # which requires EAB credentials and causes Le_LinkCert failures.
@@ -277,10 +279,13 @@ run_acme() {
 
     log_info "Running: acme.sh ${acme_args}"
 
+    # Capture current log size so post-failure grep scans only this run's output
+    log_lines_before=$(wc -l < "${LOG_FILE}" 2>/dev/null || echo 0)
+
     # Run acme.sh
     # Disable globbing to prevent wildcard domains (*.example.com) from expanding
-    # shellcheck disable=SC2086
     set -f
+    # shellcheck disable=SC2086
     if "${acme_cmd}" ${acme_args} >> "${LOG_FILE}" 2>&1; then
         set +f
         log_ok "Certificate issued successfully"
@@ -289,11 +294,19 @@ run_acme() {
         set +f
         log_error "Certificate issuance failed"
         log_error "Relevant errors from log:"
-        grep -E "(error|Error|ERR|Le_Link|Could not|Verify|challenge|dns)" "${LOG_FILE}" | tail -20 | while IFS= read -r line; do
-            log_error "  ${line}"
-        done
+        show_log_errors "${log_lines_before}"
         return 1
     fi
+}
+
+# Print error-related lines from the log starting after a given line offset
+show_log_errors() {
+    offset="${1:-0}"
+    tail -n +"$((offset + 1))" "${LOG_FILE}" | \
+        grep -E "(error|Error|ERR|Le_Link|Could not|Verify|challenge|dns)" | \
+        tail -20 | while IFS= read -r line; do
+            log_error "  ${line}"
+        done
 }
 
 # Deploy certificate to UniFi
