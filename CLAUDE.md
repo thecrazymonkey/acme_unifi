@@ -6,16 +6,8 @@ Shell automation for SSL certificate renewal on a **UniFi UCG Max** gateway. Use
 
 ## GitHub Operations
 
-Always use the `gh` CLI for all GitHub interactions — never construct GitHub URLs manually:
+Always use the `gh` CLI for all GitHub interactions — never construct GitHub URLs manually.
 
-```sh
-gh pr create            # open a pull request
-gh pr list              # list open PRs
-gh issue list           # list issues
-gh issue create         # create an issue
-gh repo view            # view repo info
-gh run list             # check CI runs
-```
 ## Key Constraints
 
 **POSIX sh only — no bash-isms.** The UCG Max runs BusyBox sh. Forbidden constructs:
