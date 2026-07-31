@@ -113,6 +113,10 @@ load_config() {
     WEBHOOK_URL="${WEBHOOK_URL:-}"
     DNS_SLEEP="${DNS_SLEEP:-60}"
     ACME_SERVER="${ACME_SERVER:-letsencrypt}"
+    # Pinned acme.sh release; bump deliberately after reviewing upstream changes.
+    # Keep in sync with the default in install.sh.
+    ACME_VERSION="${ACME_VERSION:-3.1.4}"
+    LOG_MAX_BYTES="${LOG_MAX_BYTES:-1048576}"
 
     # Auto-discover UUID if not set
     if [ -z "${CERT_UUID}" ] || [ "${CERT_UUID}" = "auto" ]; then
@@ -347,16 +351,17 @@ show_log_errors() {
 
 # Deploy certificate to UniFi
 deploy_cert() {
-    src_cert="${CERTS_DIR}/${CERT_DOMAIN}_ecc/${CERT_DOMAIN}.cer"
-    src_key="${CERTS_DIR}/${CERT_DOMAIN}_ecc/${CERT_DOMAIN}.key"
-    src_fullchain="${CERTS_DIR}/${CERT_DOMAIN}_ecc/fullchain.cer"
-
-    # Try RSA paths if ECC not found
-    if [ ! -f "${src_cert}" ]; then
-        src_cert="${CERTS_DIR}/${CERT_DOMAIN}/${CERT_DOMAIN}.cer"
-        src_key="${CERTS_DIR}/${CERT_DOMAIN}/${CERT_DOMAIN}.key"
-        src_fullchain="${CERTS_DIR}/${CERT_DOMAIN}/fullchain.cer"
+    # acme.sh stores ECC certs in <domain>_ecc/ and RSA certs in <domain>/;
+    # select by CERT_TYPE rather than probing so a stale directory left over
+    # from a key-type switch can never be deployed
+    if [ "${CERT_TYPE}" = "ecc" ]; then
+        src_dir="${CERTS_DIR}/${CERT_DOMAIN}_ecc"
+    else
+        src_dir="${CERTS_DIR}/${CERT_DOMAIN}"
     fi
+    src_cert="${src_dir}/${CERT_DOMAIN}.cer"
+    src_key="${src_dir}/${CERT_DOMAIN}.key"
+    src_fullchain="${src_dir}/fullchain.cer"
 
     # Use fullchain if available
     if [ -f "${src_fullchain}" ]; then
@@ -479,39 +484,53 @@ show_status() {
     echo "  Logs: ${LOGS_DIR}"
 }
 
-# Rotate logs
+# Rotate logs: age out old rotated files, size-cap the active ones
 rotate_logs() {
-    if [ -d "${LOGS_DIR}" ]; then
-        find "${LOGS_DIR}" -name "*.log" -mtime +"${LOG_RETENTION_DAYS}" -delete 2>/dev/null || true
-    fi
+    [ -d "${LOGS_DIR}" ] || return 0
+
+    find "${LOGS_DIR}" -name "*.log" -mtime +"${LOG_RETENTION_DAYS}" -delete 2>/dev/null || true
+
+    # Active logs are appended daily so -mtime never ages them out; rename
+    # oversized ones and let the find above delete them once they go stale
+    for f in "${LOGS_DIR}"/*.log; do
+        [ -f "${f}" ] || continue
+        size=$(wc -c < "${f}" | tr -d ' ')
+        if [ "${size:-0}" -gt "${LOG_MAX_BYTES}" ]; then
+            mv "${f}" "${f%.log}-$(date +%Y%m%d-%H%M%S).log" && log_info "Rotated oversized log: ${f}"
+        fi
+    done
 }
 
-# Update acme.sh from GitHub archive
+# Update acme.sh from a pinned GitHub release archive
 update_scripts() {
-    log_info "Updating acme.sh..."
+    log_info "Updating acme.sh to version ${ACME_VERSION}..."
 
-    ACME_ARCHIVE="https://github.com/acmesh-official/acme.sh/archive/refs/heads/master.tar.gz"
+    ACME_ARCHIVE="https://github.com/acmesh-official/acme.sh/archive/refs/tags/${ACME_VERSION}.tar.gz"
 
-    cd /tmp
+    tmp_dir=$(mktemp -d) || { log_error "Failed to create temp directory"; return 1; }
 
-    # Download archive
+    dl_ok=1
     if command -v curl >/dev/null 2>&1; then
-        curl -sSL "${ACME_ARCHIVE}" -o acme.sh.tar.gz || { log_error "Failed to download acme.sh"; return 1; }
+        curl -sSL "${ACME_ARCHIVE}" -o "${tmp_dir}/acme.sh.tar.gz" && dl_ok=0
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO acme.sh.tar.gz "${ACME_ARCHIVE}" || { log_error "Failed to download acme.sh"; return 1; }
+        wget -qO "${tmp_dir}/acme.sh.tar.gz" "${ACME_ARCHIVE}" && dl_ok=0
     else
         log_error "Neither curl nor wget available"
-        return 1
     fi
 
-    # Extract and update
-    tar -xzf acme.sh.tar.gz
-    cp -r acme.sh-master/* "${ACME_HOME}/"
-    rm -rf acme.sh.tar.gz acme.sh-master
+    update_rc=1
+    if [ "${dl_ok}" -ne 0 ]; then
+        log_error "Failed to download acme.sh ${ACME_VERSION}"
+    elif tar -xzf "${tmp_dir}/acme.sh.tar.gz" -C "${tmp_dir}" && \
+         cp -r "${tmp_dir}/acme.sh-${ACME_VERSION}"/* "${ACME_HOME}/"; then
+        update_rc=0
+        log_ok "acme.sh updated to version ${ACME_VERSION}"
+    else
+        log_error "Failed to extract or install acme.sh archive"
+    fi
 
-    cd "${SCRIPT_DIR}"
-
-    log_ok "acme.sh updated"
+    rm -rf "${tmp_dir}"
+    return "${update_rc}"
 }
 
 # Main renewal workflow

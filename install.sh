@@ -58,32 +58,32 @@ create_directories() {
 # Install acme.sh from official GitHub repository
 # https://github.com/acmesh-official/acme.sh
 install_acme() {
-    ACME_ARCHIVE="https://github.com/acmesh-official/acme.sh/archive/refs/heads/master.tar.gz"
+    # Pinned acme.sh release; keep in sync with the ACME_VERSION default in acme-unifi.sh
+    ACME_VERSION="${ACME_VERSION:-3.1.4}"
+    ACME_ARCHIVE="https://github.com/acmesh-official/acme.sh/archive/refs/tags/${ACME_VERSION}.tar.gz"
 
     if [ -d "${ACME_HOME}" ] && [ -x "${ACME_HOME}/acme.sh" ]; then
         info "acme.sh already installed"
         return 0
     fi
 
-    info "Downloading acme.sh from GitHub..."
+    info "Downloading acme.sh ${ACME_VERSION} from GitHub..."
 
     mkdir -p "${ACME_HOME}"
-    cd /tmp
+    tmp_dir=$(mktemp -d) || die "Failed to create temp directory"
 
     if command -v curl >/dev/null 2>&1; then
-        curl -sSL "${ACME_ARCHIVE}" -o acme.sh.tar.gz
+        curl -sSL "${ACME_ARCHIVE}" -o "${tmp_dir}/acme.sh.tar.gz"
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO acme.sh.tar.gz "${ACME_ARCHIVE}"
+        wget -qO "${tmp_dir}/acme.sh.tar.gz" "${ACME_ARCHIVE}"
     else
         die "Neither curl nor wget available"
     fi
 
     # Extract to ACME_HOME
-    tar -xzf acme.sh.tar.gz
-    cp -r acme.sh-master/* "${ACME_HOME}/"
-    rm -rf acme.sh.tar.gz acme.sh-master
-
-    cd "${SCRIPT_DIR}"
+    tar -xzf "${tmp_dir}/acme.sh.tar.gz" -C "${tmp_dir}"
+    cp -r "${tmp_dir}/acme.sh-${ACME_VERSION}"/* "${ACME_HOME}/"
+    rm -rf "${tmp_dir}"
 
     if [ -x "${ACME_HOME}/acme.sh" ]; then
         info "acme.sh installed successfully"
