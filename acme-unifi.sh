@@ -75,8 +75,9 @@ send_notification() {
     timestamp=$(date +"${DATE_FORMAT}")
     domain="${CERT_DOMAIN:-unknown}"
 
-    # Escape special characters for JSON (quotes and backslashes)
-    escaped_message=$(printf '%s' "${message}" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
+    # Escape special characters for JSON (quotes, backslashes, tabs; newlines
+    # flattened to spaces — BusyBox sed cannot escape them portably)
+    escaped_message=$(printf '%s' "${message}" | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
 
     payload=$(printf '{"status":"%s","domain":"%s","message":"%s","timestamp":"%s"}' \
         "${status}" "${domain}" "${escaped_message}" "${timestamp}")
@@ -174,6 +175,13 @@ clear_aws_credentials() {
     log_info "AWS credentials cleared from environment"
 }
 
+# Convert an openssl -enddate value to epoch seconds; prints nothing if
+# unparsable. GNU date uses -d, BSD/macOS uses -j -f; BusyBox date cannot
+# parse this format at all, so callers must treat empty output as "unknown".
+expiry_to_epoch() {
+    date -d "$1" +%s 2>/dev/null || date -j -f "%b %d %H:%M:%S %Y %Z" "$1" +%s 2>/dev/null || true
+}
+
 # Check certificate expiry
 # Returns 0 if renewal needed, 1 if not
 check_cert_expiry() {
@@ -192,7 +200,11 @@ check_cert_expiry() {
     fi
 
     # Convert to epoch
-    expiry_epoch=$(date -d "${expiry_date}" +%s 2>/dev/null || date -j -f "%b %d %H:%M:%S %Y %Z" "${expiry_date}" +%s 2>/dev/null)
+    expiry_epoch=$(expiry_to_epoch "${expiry_date}")
+    if [ -z "${expiry_epoch}" ]; then
+        log_warn "Could not parse expiry date '${expiry_date}' with this system's date command, assuming renewal needed"
+        return 0
+    fi
     current_epoch=$(date +%s)
 
     # Calculate days until expiry
@@ -222,9 +234,20 @@ backup_certs() {
     backup_timestamp=$(date +%Y%m%d-%H%M%S)
     backup_subdir="${BACKUP_DIR}/${backup_timestamp}"
     mkdir -p "${backup_subdir}"
+    # Backups contain private keys; keep them out of reach of non-root users
+    chmod 700 "${BACKUP_DIR}" "${backup_subdir}"
 
-    cp "${cert_file}" "${backup_subdir}/" 2>/dev/null && log_info "Backed up certificate"
-    cp "${key_file}" "${backup_subdir}/" 2>/dev/null && log_info "Backed up private key"
+    if cp "${cert_file}" "${backup_subdir}/" 2>/dev/null; then
+        log_info "Backed up certificate"
+    else
+        log_warn "Failed to back up certificate ${cert_file}"
+    fi
+    if [ -f "${key_file}" ] && cp "${key_file}" "${backup_subdir}/" 2>/dev/null; then
+        chmod 600 "${backup_subdir}/${CERT_UUID}.key"
+        log_info "Backed up private key"
+    else
+        log_warn "Failed to back up private key ${key_file}"
+    fi
 
     log_info "Backup created: ${backup_subdir}"
 }
@@ -284,19 +307,32 @@ run_acme() {
 
     # Run acme.sh
     # Disable globbing to prevent wildcard domains (*.example.com) from expanding
+    acme_rc=0
     set -f
     # shellcheck disable=SC2086
-    if "${acme_cmd}" ${acme_args} >> "${LOG_FILE}" 2>&1; then
-        set +f
-        log_ok "Certificate issued successfully"
-        return 0
-    else
-        set +f
-        log_error "Certificate issuance failed"
-        log_error "Relevant errors from log:"
-        show_log_errors "${log_lines_before}"
-        return 1
-    fi
+    "${acme_cmd}" ${acme_args} >> "${LOG_FILE}" 2>&1 || acme_rc=$?
+    set +f
+
+    case "${acme_rc}" in
+        0)
+            log_ok "Certificate issued successfully"
+            return 0
+            ;;
+        2)
+            # acme.sh exits 2 when its own copy of the cert is not yet due
+            # (RENEW_SKIP). Our expiry check gates on the *deployed* cert, so
+            # this happens when a previous run issued but failed before deploy.
+            # Proceed so the already-issued cert still gets deployed.
+            log_warn "acme.sh skipped issuance (not due in its store), deploying previously issued certificate"
+            return 0
+            ;;
+        *)
+            log_error "Certificate issuance failed"
+            log_error "Relevant errors from log:"
+            show_log_errors "${log_lines_before}"
+            return 1
+            ;;
+    esac
 }
 
 # Print error-related lines from the log starting after a given line offset
@@ -414,11 +450,13 @@ show_status() {
 
         # Check expiry
         expiry_date=$(openssl x509 -in "${cert_file}" -noout -enddate | cut -d= -f2)
-        expiry_epoch=$(date -d "${expiry_date}" +%s 2>/dev/null || date -j -f "%b %d %H:%M:%S %Y %Z" "${expiry_date}" +%s 2>/dev/null)
+        expiry_epoch=$(expiry_to_epoch "${expiry_date}")
         current_epoch=$(date +%s)
-        days_left=$(( (expiry_epoch - current_epoch) / 86400 ))
+        days_left=$(( (${expiry_epoch:-0} - current_epoch) / 86400 ))
 
-        if [ "${days_left}" -le 0 ]; then
+        if [ -z "${expiry_epoch}" ]; then
+            printf "  Status: %bUNKNOWN%b (could not parse expiry date)\n" "${YELLOW}" "${NC}"
+        elif [ "${days_left}" -le 0 ]; then
             printf "  Status: %bEXPIRED%b\n" "${RED}" "${NC}"
         elif [ "${days_left}" -le "${RENEWAL_DAYS}" ]; then
             printf "  Status: %bRENEWAL NEEDED%b (%d days left)\n" "${YELLOW}" "${NC}" "${days_left}"
@@ -532,7 +570,7 @@ Usage: $(basename "$0") [command]
 Commands:
     renew        Check and renew certificate if needed (default)
     force-renew  Force certificate renewal regardless of expiry
-    update        Update acme.sh client
+    update       Update acme.sh client
     status       Show certificate status
     help         Show this help message
 

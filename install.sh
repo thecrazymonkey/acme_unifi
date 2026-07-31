@@ -13,11 +13,18 @@ SECRETS_DIR="${SCRIPT_DIR}/.secrets"
 CRONJOBS_DIR="/data/cronjobs"
 ON_BOOT_DIR="/data/on_boot.d"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+# Colors (disabled in non-interactive mode)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    NC=''
+fi
 
 info()  { printf "%b[INFO]%b %s\n" "${GREEN}" "${NC}" "$*"; }
 warn()  { printf "%b[WARN]%b %s\n" "${YELLOW}" "${NC}" "$*"; }
@@ -42,8 +49,8 @@ create_directories() {
     mkdir -p "${CRONJOBS_DIR}"
     mkdir -p "${ON_BOOT_DIR}"
 
-    # Secure secrets directory
-    chmod 700 "${SECRETS_DIR}"
+    # Secure secrets and backup directories (backups contain private keys)
+    chmod 700 "${SECRETS_DIR}" "${BACKUP_DIR}"
 
     info "Directories created"
 }
@@ -217,8 +224,9 @@ verify_config() {
 }
 
 # Print summary
+# printf %b interprets the color escape sequences; plain cat would print them literally
 print_summary() {
-    cat <<EOF
+    printf '%b\n' "$(cat <<EOF
 
 ${GREEN}=== Installation Complete ===${NC}
 
@@ -259,8 +267,8 @@ Cron schedule:
   - acme.sh updates: Weekly on Sunday at 4:00 AM
 
 Logs: ${LOGS_DIR}/
-
 EOF
+)"
 }
 
 # Main
